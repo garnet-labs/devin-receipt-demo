@@ -1,0 +1,10 @@
+{
+  "name": "@garnet-labs/receipt-canary",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Synthetic canary for the Garnet session receipt demo. Its postinstall reaches a host this project has no reason to reach and reads a credential path. It sends nothing and contains no secret; it only exists to be recorded.",
+  "scripts": {
+    "postinstall": "node postinstall.js"
+  }
+}

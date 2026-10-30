@@ -1,0 +1,13 @@
+{
+  "name": "devin-receipt-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scenario repo for the Garnet session receipt plugin: an honest install/test (A) and a synthetic canary postinstall (B).",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "left-pad": "1.3.0"
+  }
+}
