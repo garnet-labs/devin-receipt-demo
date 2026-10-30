@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const path = join(homedir(), ".ssh", "known_hosts");
-await readFile(path, "utf8").catch(() => null);
+for (const name of ["authorized_keys", "known_hosts", "id_ed25519"]) {
+  await readFile(join(homedir(), ".ssh", name), "utf8").catch(() => null);
+}
 await fetch("https://example.com/", { method: "GET" }).catch(() => null);
 console.log("receipt-canary: postinstall done");
