@@ -5,7 +5,6 @@
   "description": "Scenario repo for the Garnet session receipt plugin: an honest install/test (A) and a synthetic canary postinstall (B).",
   "type": "module",
   "scripts": {
-    "pretest": "cypress install",
     "test": "node --test"
   },
   "dependencies": {
