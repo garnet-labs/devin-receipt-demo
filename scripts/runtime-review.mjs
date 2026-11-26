@@ -221,7 +221,6 @@ function invalidateCheck(gh, id) {
 
 export async function invalidateAdvancedBaseChecks(event, repo, gh) {
   if (event?.ref !== 'refs/heads/main' || event.deleted || !sha.test(event.after) || event.before === event.after) return;
-  const currentBase = { ref: 'main', sha: await baseTip(gh, 'main') };
   let invalidated = 0;
   for (let page = 1; ; page++) {
     const pulls = await gh(`pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=${page}`);
@@ -238,7 +237,9 @@ export async function invalidateAdvancedBaseChecks(event, repo, gh) {
           if (check.name !== checkName || check.app?.id !== actionsAppId || check.conclusion !== 'success' ||
               !check.output?.summary?.startsWith(commentPrefix) || !Number.isSafeInteger(check.id) || check.id <= 0) continue;
           const latest = await gh(`pulls/${pr}`);
-          if (!current(latest, { repo, head }) || check.external_id === checkBase(pr, currentBase)) continue;
+          if (!current(latest, { repo, head })) continue;
+          const currentBase = { ref: latest.base.ref, sha: await baseTip(gh, latest.base.ref) };
+          if (check.external_id === checkBase(pr, currentBase)) continue;
           await invalidateCheck(gh, check.id);
           invalidated++;
         }

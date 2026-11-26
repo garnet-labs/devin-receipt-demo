@@ -395,6 +395,35 @@ test('main advancing invalidates old successes but keeps comparisons for the cur
     async () => assert.fail('unrelated push')), undefined);
 });
 
+test('an older invalidation scan preserves a passing check for the latest main tip', async () => {
+  const previousTip = 'c'.repeat(40);
+  const latestTip = 'd'.repeat(40);
+  const event = { ref: 'refs/heads/main', before: base, after: previousTip };
+  const pull = {
+    number: 1, state: 'open', base: { ref: 'main', sha: base },
+    head: { sha: head, repo: { full_name: repo } }
+  };
+  const passingCheck = (id, comparison) => ({
+    id, name: 'garnet/runtime-diff', app: { id: 15368 }, conclusion: 'success',
+    external_id: `1:main:${comparison}`,
+    output: { summary: `[Garnet Runtime Review](${url}) · compared with \`${comparison}\`.` }
+  });
+  let tip = previousTip;
+  const writes = [];
+  const gh = async (path, body, method) => {
+    if (path === 'git/ref/heads/main') return { object: { sha: tip } };
+    if (path.startsWith('pulls?')) return [pull];
+    if (path === 'pulls/1') return pull;
+    if (path.startsWith(`commits/${head}/check-runs?`)) {
+      tip = latestTip;
+      return { check_runs: [passingCheck(11, previousTip), passingCheck(12, latestTip)] };
+    }
+    writes.push([path, body.conclusion, method]);
+  };
+  assert.equal(await invalidateAdvancedBaseChecks(event, repo, gh), 1);
+  assert.deepEqual(writes, [['check-runs/11', 'action_required', 'PATCH']]);
+});
+
 test('a publisher cannot leave a passing check if main advanced during publication', async () => {
   const run = {
     id: 2, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: head,
