@@ -286,7 +286,7 @@ function isWorkloadChain(proc, stepAnchors) {
   return path.slice(0, -1).includes('Runner.Worker') || stepAnchors.has(path[1]);
 }
 
-export function workloadEgress(profile) {
+export function summarizeEgress(profile) {
   const peers = profile.data.network.egress.peers;
   const stepAnchors = new Set();
   for (const peer of peers) {
@@ -298,16 +298,29 @@ export function workloadEgress(profile) {
       if (path[1] && !path.includes('Runner.Worker')) stepAnchors.add(path[1]);
     }
   }
-  const names = new Set();
+  const workload = new Set();
+  const unattributedDestinations = new Set();
+  let unattributed = 0;
   for (const peer of peers) {
-    if (!Array.isArray(peer?.proc_trees) || !peer.proc_trees.some(proc => isWorkloadChain(proc, stepAnchors))) continue;
+    if (!peer) continue;
+    let names;
+    if (!Array.isArray(peer.proc_trees) || !peer.proc_trees.length) {
+      unattributed++;
+      names = unattributedDestinations;
+    } else if (peer.proc_trees.some(proc => isWorkloadChain(proc, stepAnchors))) {
+      names = workload;
+    } else continue;
     const destinations = Array.isArray(peer.remote_names) && peer.remote_names.length
       ? peer.remote_names : [peer.remote_address];
     for (const name of destinations) {
       if (typeof name === 'string' && /^[a-zA-Z0-9.:[\]_-]{1,253}$/.test(name)) names.add(name);
     }
   }
-  return [...names].sort();
+  return {
+    observedWorkloadDestinations: !workload.size && unattributed ? 'undeterminable' : [...workload].sort(),
+    unattributed,
+    unattributedDestinations: [...unattributedDestinations].sort()
+  };
 }
 
 async function receipt(args) {
@@ -327,7 +340,7 @@ async function receipt(args) {
   }
   console.log(JSON.stringify({
     MCP: endpoint, tool: 'profiles', id: result.profile.id, ...context,
-    job: captureJob, appComment: result.url, observedWorkloadDestinations: workloadEgress(result.profile)
+    job: captureJob, appComment: result.url, ...summarizeEgress(result.profile)
   }, null, 2));
 }
 

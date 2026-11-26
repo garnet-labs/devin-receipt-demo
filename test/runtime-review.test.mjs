@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import pr6 from './pr-review-pr6.json' with { type: 'json' };
-import { decide, evidence, invalidateAdvancedBaseChecks, isGarnetComment, matchesRun, mcp, profileFor, publish, workloadEgress } from '../scripts/runtime-review.mjs';
+import { decide, evidence, invalidateAdvancedBaseChecks, isGarnetComment, matchesRun, mcp, profileFor, publish, summarizeEgress } from '../scripts/runtime-review.mjs';
 
 const head = 'a'.repeat(40);
 const base = 'b'.repeat(40);
@@ -176,7 +176,7 @@ test('MCP profiles use exact selectors and paginate', async () => {
     return { items: [], pageInfo: { hasNextPage: true, endCursor: 'page2' } };
   });
   assert.equal(result.id, id);
-  assert.deepEqual(workloadEgress(result), ['example.com']);
+  assert.deepEqual(summarizeEgress(result).observedWorkloadDestinations, ['example.com']);
 });
 
 test('receipt includes workload egress from install, smoke, and build, not runner-only peers', () => {
@@ -189,7 +189,7 @@ test('receipt includes workload egress from install, smoke, and build, not runne
     { remote_names: ['setup.example'], proc_trees: [{ github_step: '1. Set up job' }] },
     { remote_names: ['post.example'], proc_trees: [{ github_step: '8. Post Run checkout' }] }
   );
-  assert.deepEqual(workloadEgress(item), ['10.0.0.1', '169.254.169.254', 'example.com', 'install.example']);
+  assert.deepEqual(summarizeEgress(item).observedWorkloadDestinations, ['10.0.0.1', '169.254.169.254', 'example.com', 'install.example']);
 });
 
 test('receipt uses recorded ancestry when workload and runner chains share the sentinel step', () => {
@@ -210,7 +210,7 @@ test('receipt uses recorded ancestry when workload and runner chains share the s
       { github_step: sentinel, ancestry: ['systemd', 'Runner.Listener'] }
     ] }
   ];
-  assert.deepEqual(workloadEgress(item), ['10.0.0.2', 'dependency.example', 'named-step.example']);
+  assert.deepEqual(summarizeEgress(item).observedWorkloadDestinations, ['10.0.0.2', 'dependency.example', 'named-step.example']);
 });
 
 test('runner control traffic and cleanup do not become workload just because they use the worker', () => {
@@ -227,10 +227,32 @@ test('runner control traffic and cleanup do not become workload just because the
     ] },
     { remote_names: ['setup.example'], proc_trees: [
       { github_step: '1. Set up job', ancestry: [...workerPath, 'node'] }
-    ] },
-    { remote_names: ['missing-lineage.example'], proc_trees: [] }
+    ] }
   ];
-  assert.deepEqual(workloadEgress(item), []);
+  assert.deepEqual(summarizeEgress(item).observedWorkloadDestinations, []);
+});
+
+test('missing process trees are reported separately from workload and no egress', () => {
+  const item = profile();
+  item.data.network.egress.peers = [];
+  assert.deepEqual(summarizeEgress(item), {
+    observedWorkloadDestinations: [], unattributed: 0, unattributedDestinations: []
+  });
+  item.data.network.egress.peers.push(
+    { remote_names: ['unattributed.example'], proc_trees: [] },
+    { remote_address: '10.0.0.3' }
+  );
+  assert.deepEqual(summarizeEgress(item), {
+    observedWorkloadDestinations: 'undeterminable',
+    unattributed: 2, unattributedDestinations: ['10.0.0.3', 'unattributed.example']
+  });
+  item.data.network.egress.peers.push({
+    remote_names: ['workload.example'], proc_trees: [{ github_step: '3. Install dependencies' }]
+  });
+  assert.deepEqual(summarizeEgress(item), {
+    observedWorkloadDestinations: ['workload.example'],
+    unattributed: 2, unattributedDestinations: ['10.0.0.3', 'unattributed.example']
+  });
 });
 
 test('stale, missing, duplicate and unreadable observations do not pass', async () => {
