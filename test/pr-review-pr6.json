@@ -1,0 +1,41 @@
+{
+  "result": "unchanged",
+  "capture_quality": "best-effort",
+  "status": "finalized",
+  "scope": "pr-base",
+  "head_sha": "a21d6a5605e3071b21bb505d0bf360d5ae3ea316",
+  "marker_commit": "a21d6a5605e3071b21bb505d0bf360d5ae3ea316",
+  "bound_to_head": true,
+  "reasons": [],
+  "comment_url": "https://github.com/garnet-labs/claude-ship-garnet/pull/6#issuecomment-7177218621",
+  "envelope": {
+    "contract": "11.1.0",
+    "commit": "a21d6a5605e3071b21bb505d0bf360d5ae3ea316",
+    "previous": "de1e54d4a98a6742176a63f3719c295a979ef0f9",
+    "scope": "pr-base",
+    "sincePush": {
+      "sha": "2bfcd5e320bbb7b5f61fc6165acabd3f54f40a36",
+      "added": 0,
+      "removed": 1
+    },
+    "unattributed": 0,
+    "outcome": "unchanged",
+    "heading": "No new runtime behavior recorded",
+    "line": "No new runtime behavior recorded · Garnet runs in 1 of 3 `CI` jobs · compared with 4 runs on `main`",
+    "status": "finalized",
+    "capture_quality": "best-effort",
+    "jobs": 1,
+    "changed": 0,
+    "added": 0,
+    "removed": 0,
+    "backgroundAdded": 1,
+    "backgroundRemoved": 11,
+    "vanished": 0,
+    "incomplete": 0,
+    "destinations": 0,
+    "recorded": "2026-11-25 23:52:10 UTC",
+    "items": null,
+    "trimmed": false
+  },
+  "profile_ids": ["01a2151f-bd4d-7ffb-baac-fa2a1093c0ae"]
+}
