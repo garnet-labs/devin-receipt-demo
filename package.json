@@ -12,7 +12,7 @@
     "@garnet-labs/receipt-canary": "file:packages/receipt-canary"
   },
   "devDependencies": {
-    "@sentry/cli": "3.8.1",
+    "@sentry/cli": "3.8.2",
     "cypress": "16.3.0"
   },
   "allowScripts": {
