@@ -132,6 +132,25 @@ test('PR #6 publishes success only after binding its App comment and capture pro
     readMcp({ ...recordedProfile, id })), null);
   assert.equal(await evidence(async path => path === 'git/ref/heads/main' ? { object: { sha: head } } : getComment(path),
     recordedContext, staleBase, readMcp(recordedProfile)), null);
+
+  const tip = 'd'.repeat(40);
+  const compare = (lower, upper) => async path => {
+    if (path === 'git/ref/heads/main') return { object: { sha: tip } };
+    if (path === `compare/${staleBase.sha}...${recordedBase}?per_page=1`) return { status: lower };
+    if (path === `compare/${recordedBase}...${tip}?per_page=1`) {
+      if (upper instanceof Error) throw upper;
+      return { status: upper };
+    }
+    return getComment(path);
+  };
+  const inRange = await evidence(compare('ahead', 'ahead'), recordedContext, staleBase, readMcp(recordedProfile));
+  assert.equal(inRange?.comparisonBase, recordedBase);
+  assert.equal(inRange?.verdict, 'nothing-new');
+  const mustNotReadProfile = async () => assert.fail('Unbound comparison reached the profile lookup');
+  assert.equal(await evidence(compare('behind', 'ahead'), recordedContext, staleBase, mustNotReadProfile), null);
+  assert.equal(await evidence(compare('ahead', 'diverged'), recordedContext, staleBase, mustNotReadProfile), null);
+  assert.equal(await evidence(compare('ahead', new Error('GitHub unavailable')), recordedContext, staleBase,
+    mustNotReadProfile), null);
 });
 
 test('GitHub App identity and exact run attempt cannot be substituted', () => {
@@ -461,6 +480,8 @@ test('a publisher revokes a pass when the live base ref moves but the PR base SH
     if (path === 'pulls/1') return pull;
     if (path === 'actions/runs/2') return run;
     if (path === 'git/ref/heads/main') return { object: { sha: writes.length ? newTip : comparisonBase } };
+    if (path === `compare/${base}...${comparisonBase}?per_page=1`) return { status: 'ahead' };
+    if (path === `compare/${comparisonBase}...${newTip}?per_page=1`) return { status: 'diverged' };
     if (path === 'check-runs') return { id: 1 };
     assert.equal(path, 'check-runs/1');
     writes.push([body.conclusion, body.external_id, method]);
