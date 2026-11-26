@@ -51,11 +51,11 @@ test('the recorded PR #6 App marker passes only when finalized and bound to the 
   assert.equal(decide({ ...envelope, outcome: 'changed', changed: undefined }, recordedHead, recordedBase), 'unknown');
 });
 
-function appEvidence(comment, context, jobId) {
+function appEvidence(comment, context, jobId, jobAttempt = { run_attempt: context.attempt }) {
   return async path => {
     if (path === `issues/${context.pr}/comments?per_page=100&page=1`) return [comment];
     assert.equal(path, `actions/runs/${context.run}/attempts/${context.attempt}/jobs?per_page=100`);
-    return { total_count: 1, jobs: [{ id: jobId, name: 'runtime-build', conclusion: 'success', run_attempt: context.attempt }] };
+    return { total_count: 1, jobs: [{ id: jobId, name: 'runtime-build', conclusion: 'success', ...jobAttempt }] };
   };
 }
 
@@ -279,6 +279,8 @@ test('the hosted comparison must match the linked App comment and capture run', 
   const matched = await evidence(appEvidence(comment, context, 123), context, base, read);
   assert.equal(matched.verdict, 'nothing-new');
   assert.equal(matched.profile.id, id);
+  assert.deepEqual(await evidence(appEvidence(comment, context, 123, {}), context, base, read), matched);
+  assert.equal(await evidence(appEvidence(comment, context, 123, { run_attempt: 2 }), context, base, read), null);
   for (const body of [
     comment.body.replace('/runs/2/', '/runs/3/'),
     comment.body.replace('/job/123', '/job/124'),

@@ -151,7 +151,8 @@ export async function evidence(gh, context, base, call = mcp) {
   const result = await gh(`actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`);
   if (!Array.isArray(result?.jobs) || result.total_count !== result.jobs.length) return null;
   const jobs = result.jobs.filter(job => job.name === captureJob);
-  if (jobs.length !== 1 || jobs[0].conclusion !== 'success' || jobs[0].run_attempt !== attempt ||
+  if (jobs.length !== 1 || jobs[0].conclusion !== 'success' ||
+      (jobs[0].run_attempt !== undefined && jobs[0].run_attempt !== attempt) ||
       !Number.isSafeInteger(jobs[0].id) || jobs[0].id <= 0) return null;
   const jobPath = `/${repo}/actions/runs/${run}/job/${jobs[0].id}`;
   const profileIds = new Set();
