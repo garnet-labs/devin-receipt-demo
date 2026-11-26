@@ -446,6 +446,34 @@ test('a publisher cannot leave a passing check if main advanced during publicati
   assert.deepEqual(conclusions, ['success', 'action_required']);
 });
 
+test('a publisher revokes a pass when the live base ref moves but the PR base SHA stays fixed', async () => {
+  const comparisonBase = 'c'.repeat(40);
+  const newTip = 'd'.repeat(40);
+  const run = {
+    id: 2, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: head,
+    run_attempt: 1, head_repository: { full_name: repo }, pull_requests: [{ number: 1 }], conclusion: 'success'
+  };
+  const pull = {
+    state: 'open', base: { ref: 'main', sha: base }, head: { sha: head, repo: { full_name: repo } }
+  };
+  const writes = [];
+  const gh = async (path, body, method) => {
+    if (path === 'pulls/1') return pull;
+    if (path === 'actions/runs/2') return run;
+    if (path === 'git/ref/heads/main') return { object: { sha: writes.length ? newTip : comparisonBase } };
+    if (path === 'check-runs') return { id: 1 };
+    assert.equal(path, 'check-runs/1');
+    writes.push([body.conclusion, body.external_id, method]);
+  };
+  assert.equal(await publish(run, repo, gh, async () => ({
+    verdict: 'nothing-new', url, profile: profile(), comparisonBase
+  })), `garnet/runtime-diff: superseded on ${head}`);
+  assert.deepEqual(writes, [
+    ['success', `1:main:${comparisonBase}`, 'PATCH'],
+    ['action_required', undefined, 'PATCH']
+  ]);
+});
+
 test('MCP transport handles JSON and SSE, but never parses tool text as evidence', async () => {
   const value = { one: 1 };
   const result = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { structuredContent: value } });
