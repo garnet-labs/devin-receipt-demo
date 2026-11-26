@@ -258,15 +258,32 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
   return `${checkName}: ${verdict} on ${head}`;
 }
 
-function isWorkloadStep(step) {
-  if (typeof step !== 'string') return false;
-  const name = step.replace(/^\d+\.\s+/, '').replace(/\(\s*\$\{\{[^}]*\}\}\s*\)|\$\{\{[^}]*\}\}/g, '').trim();
-  return !!name && !/^(?:<unknown>|Runner Processes|Set up job|Complete job|Post Run(?: .*)?)$/i.test(name);
+function stepName(proc) {
+  if (typeof proc?.github_step !== 'string') return '';
+  return proc.github_step.replace(/^\d+\.\s+/, '').replace(/\(\s*\$\{\{[^}]*\}\}\s*\)|\$\{\{[^}]*\}\}/g, '').trim();
 }
 
-function workerLineage(proc) {
-  const ancestry = Array.isArray(proc?.ancestry) ? proc.ancestry.filter(Boolean) : [];
-  return ancestry.length ? ancestry.includes('Runner.Worker') : proc?.process === 'Runner.Worker';
+function isInfrastructureStep(step) {
+  return /^(?:Set up job|Complete job|Post Run(?: .*)?)$/i.test(step);
+}
+
+function hasRecordedStep(step) {
+  return !!step && !/^(?:<unknown>|Runner Processes)$/i.test(step);
+}
+
+function processPath(proc) {
+  const path = Array.isArray(proc?.ancestry) ? proc.ancestry.filter(Boolean) : [];
+  if (proc?.process && path.at(-1) !== proc.process) path.push(proc.process);
+  return path;
+}
+
+function isWorkloadChain(proc, stepAnchors) {
+  const step = stepName(proc);
+  if (isInfrastructureStep(step)) return false;
+  if (hasRecordedStep(step)) return true;
+  const path = processPath(proc);
+  if (path.at(-1) === 'Runner.Worker' || path.at(-1) === 'Runner.Listener') return false;
+  return path.slice(0, -1).includes('Runner.Worker') || stepAnchors.has(path[1]);
 }
 
 export function workloadEgress(profile) {
@@ -275,18 +292,15 @@ export function workloadEgress(profile) {
   for (const peer of peers) {
     if (!Array.isArray(peer?.proc_trees)) continue;
     for (const proc of peer.proc_trees) {
-      if (Array.isArray(proc?.ancestry) && proc.ancestry[1] && isWorkloadStep(proc.github_step) && !workerLineage(proc)) {
-        stepAnchors.add(proc.ancestry[1]);
-      }
+      const step = stepName(proc);
+      if (!hasRecordedStep(step) || isInfrastructureStep(step)) continue;
+      const path = processPath(proc);
+      if (path[1] && !path.includes('Runner.Worker')) stepAnchors.add(path[1]);
     }
   }
   const names = new Set();
   for (const peer of peers) {
-    if (!peer || peer.proc_trees != null && !Array.isArray(peer.proc_trees)) continue;
-    if (peer.proc_trees?.length && !peer.proc_trees.some(proc =>
-      isWorkloadStep(proc?.github_step) || workerLineage(proc) ||
-      (Array.isArray(proc?.ancestry) && stepAnchors.has(proc.ancestry[1]))
-    )) continue;
+    if (!Array.isArray(peer?.proc_trees) || !peer.proc_trees.some(proc => isWorkloadChain(proc, stepAnchors))) continue;
     const destinations = Array.isArray(peer.remote_names) && peer.remote_names.length
       ? peer.remote_names : [peer.remote_address];
     for (const name of destinations) {

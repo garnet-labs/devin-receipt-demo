@@ -208,10 +208,29 @@ test('receipt uses recorded ancestry when workload and runner chains share the s
     ] },
     { remote_names: ['runner.example'], proc_trees: [
       { github_step: sentinel, ancestry: ['systemd', 'Runner.Listener'] }
+    ] }
+  ];
+  assert.deepEqual(workloadEgress(item), ['10.0.0.2', 'dependency.example', 'named-step.example']);
+});
+
+test('runner control traffic and cleanup do not become workload just because they use the worker', () => {
+  const workerPath = ['systemd', 'Runner.Listener', 'Runner.Worker'];
+  const item = profile();
+  item.data.network.egress.peers = [
+    { remote_names: ['worker.example'], proc_trees: [
+      { github_step: '99. Runner Processes', ancestry: workerPath, process: 'Runner.Worker' },
+      { github_step: '99. Runner Processes', process: 'Runner.Worker' }
+    ] },
+    { remote_names: ['cleanup.example'], proc_trees: [
+      { github_step: '8. Post Run checkout', ancestry: [...workerPath, 'node'] },
+      { github_step: '9. Complete job', ancestry: [...workerPath, 'bash'] }
+    ] },
+    { remote_names: ['setup.example'], proc_trees: [
+      { github_step: '1. Set up job', ancestry: [...workerPath, 'node'] }
     ] },
     { remote_names: ['missing-lineage.example'], proc_trees: [] }
   ];
-  assert.deepEqual(workloadEgress(item), ['10.0.0.2', 'dependency.example', 'missing-lineage.example', 'named-step.example']);
+  assert.deepEqual(workloadEgress(item), []);
 });
 
 test('stale, missing, duplicate and unreadable observations do not pass', async () => {
