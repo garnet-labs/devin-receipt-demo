@@ -199,10 +199,17 @@ async function baseTip(gh, ref) {
   return result.object.sha;
 }
 
+async function isAncestor(gh, ancestor, descendant) {
+  const result = await gh(`compare/${ancestor}...${descendant}?per_page=1`);
+  return result?.status === 'ahead' || result?.status === 'identical';
+}
+
 async function matchesBase(gh, base, comparisonBase) {
   if (comparisonBase === base.sha) return true;
   try {
-    return comparisonBase === await baseTip(gh, base.ref);
+    const tip = await baseTip(gh, base.ref);
+    return comparisonBase === tip ||
+      (await isAncestor(gh, base.sha, comparisonBase) && await isAncestor(gh, comparisonBase, tip));
   } catch {
     return false;
   }
