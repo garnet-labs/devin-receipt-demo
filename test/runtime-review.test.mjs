@@ -192,6 +192,28 @@ test('receipt includes workload egress from install, smoke, and build, not runne
   assert.deepEqual(workloadEgress(item), ['10.0.0.1', '169.254.169.254', 'example.com', 'install.example']);
 });
 
+test('receipt uses recorded ancestry when workload and runner chains share the sentinel step', () => {
+  const worker = ['systemd', 'Runner.Listener', 'Runner.Worker'];
+  const sentinel = '99. Runner Processes';
+  const item = profile();
+  item.data.network.egress.peers = [
+    { remote_names: ['dependency.example'], proc_trees: [
+      { github_step: sentinel, ancestry: [...worker, 'bash', 'npm'] }
+    ] },
+    { remote_names: ['named-step.example'], proc_trees: [
+      { github_step: '3. Install dependencies', ancestry: ['systemd', 'job-shell', 'npm'] }
+    ] },
+    { remote_address: '10.0.0.2', proc_trees: [
+      { github_step: sentinel, ancestry: ['systemd', 'job-shell', 'node'] }
+    ] },
+    { remote_names: ['runner.example'], proc_trees: [
+      { github_step: sentinel, ancestry: ['systemd', 'Runner.Listener'] }
+    ] },
+    { remote_names: ['missing-lineage.example'], proc_trees: [] }
+  ];
+  assert.deepEqual(workloadEgress(item), ['10.0.0.2', 'dependency.example', 'missing-lineage.example', 'named-step.example']);
+});
+
 test('stale, missing, duplicate and unreadable observations do not pass', async () => {
   const stale = profile();
   stale.data.scenarios.github.head_sha = base;

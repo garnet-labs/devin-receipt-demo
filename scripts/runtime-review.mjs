@@ -207,15 +207,33 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
 
 function isWorkloadStep(step) {
   if (typeof step !== 'string') return false;
-  const name = step.replace(/^\d+\.\s+/, '').trim();
+  const name = step.replace(/^\d+\.\s+/, '').replace(/\(\s*\$\{\{[^}]*\}\}\s*\)|\$\{\{[^}]*\}\}/g, '').trim();
   return !!name && !/^(?:<unknown>|Runner Processes|Set up job|Complete job|Post Run(?: .*)?)$/i.test(name);
+}
+
+function workerLineage(proc) {
+  const ancestry = Array.isArray(proc?.ancestry) ? proc.ancestry.filter(Boolean) : [];
+  return ancestry.length ? ancestry.includes('Runner.Worker') : proc?.process === 'Runner.Worker';
 }
 
 export function workloadEgress(profile) {
   const peers = profile.data.network.egress.peers;
+  const stepAnchors = new Set();
+  for (const peer of peers) {
+    if (!Array.isArray(peer?.proc_trees)) continue;
+    for (const proc of peer.proc_trees) {
+      if (Array.isArray(proc?.ancestry) && proc.ancestry[1] && isWorkloadStep(proc.github_step) && !workerLineage(proc)) {
+        stepAnchors.add(proc.ancestry[1]);
+      }
+    }
+  }
   const names = new Set();
   for (const peer of peers) {
-    if (!Array.isArray(peer?.proc_trees) || !peer.proc_trees.some(proc => isWorkloadStep(proc?.github_step))) continue;
+    if (!peer || peer.proc_trees != null && !Array.isArray(peer.proc_trees)) continue;
+    if (peer.proc_trees?.length && !peer.proc_trees.some(proc =>
+      isWorkloadStep(proc?.github_step) || workerLineage(proc) ||
+      (Array.isArray(proc?.ancestry) && stepAnchors.has(proc.ancestry[1]))
+    )) continue;
     const destinations = Array.isArray(peer.remote_names) && peer.remote_names.length
       ? peer.remote_names : [peer.remote_address];
     for (const name of destinations) {
