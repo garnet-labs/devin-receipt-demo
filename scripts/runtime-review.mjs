@@ -145,8 +145,9 @@ export async function evidence(gh, context, base, call = mcp) {
   } catch {
     return null;
   }
-  const verdict = decide(marker, head, base);
-  if (verdict === 'unknown') return null;
+  const comparisonBase = marker?.previous;
+  const verdict = decide(marker, head, comparisonBase);
+  if (verdict === 'unknown' || !(await matchesBase(gh, base, comparisonBase))) return null;
 
   const result = await gh(`actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`);
   if (!Array.isArray(result?.jobs) || result.total_count !== result.jobs.length) return null;
@@ -172,7 +173,7 @@ export async function evidence(gh, context, base, call = mcp) {
   }
   if (!linkedJob || profileIds.size !== 1) return null;
   const profile = await profileFor(context, [...profileIds][0], call);
-  return profile ? { verdict, profile, url: comment.html_url } : null;
+  return profile ? { verdict, profile, url: comment.html_url, comparisonBase } : null;
 }
 
 function selectors(repo, pr, head, run, attempt) {
@@ -191,6 +192,22 @@ function checkBase(pr, base) {
   return `${pr}:${base.ref}:${base.sha}`;
 }
 
+async function baseTip(gh, ref) {
+  const path = ref.split('/').map(encodeURIComponent).join('/');
+  const result = await gh(`git/ref/heads/${path}`);
+  if (!sha.test(result?.object?.sha)) throw new Error('Invalid base branch head');
+  return result.object.sha;
+}
+
+async function matchesBase(gh, base, comparisonBase) {
+  if (comparisonBase === base.sha) return true;
+  try {
+    return comparisonBase === await baseTip(gh, base.ref);
+  } catch {
+    return false;
+  }
+}
+
 function invalidateCheck(gh, id) {
   return gh(`check-runs/${id}`, {
     status: 'completed',
@@ -204,6 +221,7 @@ function invalidateCheck(gh, id) {
 
 export async function invalidateAdvancedBaseChecks(event, repo, gh) {
   if (event?.ref !== 'refs/heads/main' || event.deleted || !sha.test(event.after) || event.before === event.after) return;
+  const currentBase = { ref: 'main', sha: await baseTip(gh, 'main') };
   let invalidated = 0;
   for (let page = 1; ; page++) {
     const pulls = await gh(`pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=${page}`);
@@ -220,7 +238,7 @@ export async function invalidateAdvancedBaseChecks(event, repo, gh) {
           if (check.name !== checkName || check.app?.id !== actionsAppId || check.conclusion !== 'success' ||
               !check.output?.summary?.startsWith(commentPrefix) || !Number.isSafeInteger(check.id) || check.id <= 0) continue;
           const latest = await gh(`pulls/${pr}`);
-          if (!current(latest, { repo, head }) || check.external_id === checkBase(pr, latest.base)) continue;
+          if (!current(latest, { repo, head }) || check.external_id === checkBase(pr, currentBase)) continue;
           await invalidateCheck(gh, check.id);
           invalidated++;
         }
@@ -239,7 +257,7 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
   const getPR = () => gh(`pulls/${pr}`);
   const initial = await getPR();
   if (!current(initial, context)) return;
-  const base = initial.base.sha;
+  const base = initial.base;
   const check = await gh('check-runs', {
     name: checkName, head_sha: head, status: 'in_progress', external_id: checkBase(pr, initial.base),
     details_url: `https://github.com/${repo}/actions/runs/${run.id}`,
@@ -251,7 +269,7 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
     for (let tries = 0; tries < 24 && !result && Date.now() < deadline; tries++) {
       if (tries > 0) await wait(15_000);
       const pull = await getPR();
-      if (!current(pull, context) || pull.base.sha !== base) break;
+      if (!current(pull, context) || pull.base.sha !== base.sha) break;
       try {
         result = await readEvidence(gh, context, base);
       } catch {
@@ -261,7 +279,8 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
   }
   const latest = await getPR();
   const githubRun = await gh(`actions/runs/${run.id}`);
-  const active = current(latest, context) && latest.base.sha === base && matchesRun(githubRun, context);
+  const active = current(latest, context) && latest.base.sha === base.sha && matchesRun(githubRun, context) &&
+    (!result || await matchesBase(gh, base, result.comparisonBase));
   const verdict = active ? (result?.verdict ?? 'unknown') : 'superseded';
   const args = [repo, pr, head, run.id, run.run_attempt].join(' ');
   const conclusion = ['nothing-new', 'background-only'].includes(verdict) ? 'success' :
@@ -276,7 +295,7 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
     ? {
       title: titles[verdict],
       summary: [
-        `[Garnet Runtime Review](${result.url}) · compared with \`${base}\` · capture is best-effort.`,
+        `[Garnet Runtime Review](${result.url}) · compared with \`${result.comparisonBase}\` · capture is best-effort.`,
         `Head \`${head}\` · Linux run \`${run.id}\` attempt \`${run.run_attempt}\` · MCP profile \`${result.profile.id}\`.`,
         ...(verdict === 'background-only' ? ['Garnet reported changes to connections not tied to a workflow step.'] : []),
         ...(verdict === 'changed' ? [`Garnet receipt lookup selectors: \`${args}\`.`] : []),
@@ -284,10 +303,14 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
       ].join('\n\n')
     }
     : { title: 'No usable runtime comparison', summary: 'No passing gate was issued. Do not attempt a code fix from this check.' };
-  await gh(`check-runs/${check.id}`, { status: 'completed', conclusion, output }, 'PATCH');
+  await gh(`check-runs/${check.id}`, {
+    status: 'completed', conclusion, output,
+    ...(active && result ? { external_id: checkBase(pr, { ...base, sha: result.comparisonBase }) } : {})
+  }, 'PATCH');
   if (conclusion === 'success') {
     const published = await getPR();
-    if (!current(published, context) || published.base.sha !== base) {
+    if (!current(published, context) || published.base.sha !== base.sha ||
+        !(await matchesBase(gh, base, result.comparisonBase))) {
       await invalidateCheck(gh, check.id);
       return `${checkName}: superseded on ${head}`;
     }
@@ -371,9 +394,10 @@ async function receipt(args) {
   const pull = await gh(`pulls/${context.pr}`);
   const githubRun = await gh(`actions/runs/${context.run}`);
   if (!current(pull, context) || !matchesRun(githubRun, context)) throw new Error('Selectors do not match the current PR head and capture run');
-  const result = await evidence(gh, context, pull.base.sha);
+  const result = await evidence(gh, context, pull.base);
   const latest = await gh(`pulls/${context.pr}`);
-  if (result?.verdict !== 'changed' || !current(latest, context) || latest.base.sha !== pull.base.sha) {
+  if (result?.verdict !== 'changed' || !current(latest, context) || latest.base.sha !== pull.base.sha ||
+      !(await matchesBase(gh, latest.base, result.comparisonBase))) {
     throw new Error('No current changed receipt is available');
   }
   console.log(JSON.stringify({
