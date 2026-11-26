@@ -317,7 +317,8 @@ export function summarizeEgress(profile) {
     }
   }
   return {
-    observedWorkloadDestinations: !workload.size && unattributed ? 'undeterminable' : [...workload].sort(),
+    observedWorkloadDestinations: [...workload].sort(),
+    ...(unattributed ? { workloadAttribution: workload.size ? 'partial' : 'undeterminable' } : {}),
     unattributed,
     unattributedDestinations: [...unattributedDestinations].sort()
   };

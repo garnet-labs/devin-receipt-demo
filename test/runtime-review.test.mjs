@@ -243,14 +243,14 @@ test('missing process trees are reported separately from workload and no egress'
     { remote_address: '10.0.0.3' }
   );
   assert.deepEqual(summarizeEgress(item), {
-    observedWorkloadDestinations: 'undeterminable',
+    observedWorkloadDestinations: [], workloadAttribution: 'undeterminable',
     unattributed: 2, unattributedDestinations: ['10.0.0.3', 'unattributed.example']
   });
   item.data.network.egress.peers.push({
     remote_names: ['workload.example'], proc_trees: [{ github_step: '3. Install dependencies' }]
   });
   assert.deepEqual(summarizeEgress(item), {
-    observedWorkloadDestinations: ['workload.example'],
+    observedWorkloadDestinations: ['workload.example'], workloadAttribution: 'partial',
     unattributed: 2, unattributedDestinations: ['10.0.0.3', 'unattributed.example']
   });
 });
