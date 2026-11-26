@@ -53,18 +53,16 @@ function github(repo, token) {
   };
 }
 
-export function decide(review, head, base) {
-  const marker = review?.envelope;
+export function decide(marker, head, base) {
   if (!sha.test(head) || !sha.test(base) ||
-      review?.bound_to_head !== true ||
-      review.head_sha !== head || review.marker_commit !== head || marker?.commit !== head ||
-      review.status !== 'finalized' || marker.status !== 'finalized' ||
-      !['complete', 'best-effort'].includes(review.capture_quality) ||
-      marker.capture_quality !== review.capture_quality || marker.incomplete !== 0 ||
-      marker.jobs !== 1 || !['pr-base', 'base-ancestor'].includes(review.scope) || marker.scope !== review.scope ||
-      marker.previous !== base || marker.outcome !== review.result) return 'unknown';
-  if (review.result === 'changed' && marker.changed === 1) return 'changed';
-  if (review.result === 'unchanged' && marker.changed === 0 && marker.added === 0) {
+      marker?.commit !== head || marker.previous !== base || marker.status !== 'finalized' ||
+      !['complete', 'best-effort'].includes(marker.capture_quality) || marker.incomplete !== 0 ||
+      marker.jobs !== 1 || !['pr-base', 'base-ancestor'].includes(marker.scope)) return 'unknown';
+  if (marker.outcome === 'changed' && marker.changed === 1) return 'changed';
+  if (marker.outcome === 'changed' && marker.changed === 0 && marker.added === 0 &&
+      marker.removed === 0 && marker.unattributed === 0 &&
+      Number.isSafeInteger(marker.backgroundAdded) && marker.backgroundAdded > 0) return 'background-only';
+  if (marker.outcome === 'unchanged' && marker.changed === 0 && marker.added === 0) {
     if (marker.removed === 0) return 'nothing-new';
     if (Number.isSafeInteger(marker.removed) && marker.removed > 0) return 'removals-only';
   }
@@ -108,37 +106,72 @@ export async function profileFor({ repo, head, run, attempt }, id, call = mcp) {
   } while (true);
 }
 
-export function isGarnetComment(comment, head, url) {
-  if (comment?.html_url !== url || comment.user?.id !== 210813234 ||
+export function isGarnetComment(comment, { repo, pr }) {
+  if (!Number.isSafeInteger(comment?.id) || comment.id <= 0 ||
+      comment.html_url !== `https://github.com/${repo}/pull/${pr}#issuecomment-${comment.id}` ||
+      comment.user?.id !== 210813234 ||
       comment.performed_via_github_app?.id !== 1249875 || typeof comment.body !== 'string') return false;
-  const lines = comment.body.split(/\r?\n/);
-  return lines.includes('<!-- garnet-control-plane-pr-comment:v1:app.garnet.ai -->') &&
-    lines.includes(`<!-- garnet:commit ${head} -->`);
+  return comment.body.split(/\r?\n/).includes('<!-- garnet-control-plane-pr-comment:v1:app.garnet.ai -->');
+}
+
+async function appComment(gh, context) {
+  let match;
+  for (let page = 1; page <= 5; page++) {
+    const comments = await gh(`issues/${context.pr}/comments?per_page=100&page=${page}`);
+    if (!Array.isArray(comments)) return null;
+    for (const comment of comments) {
+      if (!isGarnetComment(comment, context)) continue;
+      if (match) return null;
+      match = comment;
+    }
+    if (comments.length < 100) return match;
+  }
+  return null;
 }
 
 export async function evidence(gh, context, base, call = mcp) {
-  const { repo, pr, head, run } = context;
-  const [githubOrg, name] = repo.split('/');
-  const review = await call('pr_review', { githubOrg, repo: name, pullNumber: pr });
-  const verdict = decide(review, head, base);
-  if (verdict === 'unknown' || !Array.isArray(review.profile_ids) || review.profile_ids.length !== 1) return null;
-  const url = `https://github.com/${repo}/pull/${pr}#issuecomment-`;
-  const commentId = review.comment_url?.startsWith(url) && review.comment_url.slice(url.length);
-  if (!/^[1-9]\d*$/.test(commentId || '')) return null;
-  const comment = await gh(`issues/comments/${commentId}`);
-  if (!isGarnetComment(comment, head, review.comment_url) ||
-      !comment.body.includes(`https://github.com/${repo}/actions/runs/${run}/job/`)) return null;
-  const markers = comment.body.split(/\r?\n/).flatMap(line => {
-    const match = /^<!-- garnet:summary (\{.*\}) -->$/.exec(line);
-    return match ? [JSON.parse(match[1])] : [];
-  });
-  const fields = [
-    'commit', 'previous', 'outcome', 'scope', 'status', 'capture_quality', 'recorded',
-    'incomplete', 'jobs', 'changed', 'added', 'removed'
-  ];
-  if (markers.length !== 1 || fields.some(key => markers[0][key] !== review.envelope[key])) return null;
-  const profile = await profileFor(context, review.profile_ids[0], call);
-  return profile ? { verdict, profile, url: review.comment_url } : null;
+  const { repo, head, run, attempt } = context;
+  const comment = await appComment(gh, context);
+  if (!comment) return null;
+  const lines = comment.body.split(/\r?\n/);
+  const commits = lines.filter(line => line.startsWith('<!-- garnet:commit '));
+  if (commits.length !== 1 || commits[0] !== `<!-- garnet:commit ${head} -->`) return null;
+  const markers = lines.filter(line => line.startsWith('<!-- garnet:summary '));
+  const summary = markers.length === 1 && /^<!-- garnet:summary (\{.*\}) -->$/.exec(markers[0]);
+  if (!summary) return null;
+  let marker;
+  try {
+    marker = JSON.parse(summary[1]);
+  } catch {
+    return null;
+  }
+  const verdict = decide(marker, head, base);
+  if (verdict === 'unknown') return null;
+
+  const result = await gh(`actions/runs/${run}/attempts/${attempt}/jobs?per_page=100`);
+  if (!Array.isArray(result?.jobs) || result.total_count !== result.jobs.length) return null;
+  const jobs = result.jobs.filter(job => job.name === captureJob);
+  if (jobs.length !== 1 || jobs[0].conclusion !== 'success' || jobs[0].run_attempt !== attempt ||
+      !Number.isSafeInteger(jobs[0].id) || jobs[0].id <= 0) return null;
+  const jobPath = `/${repo}/actions/runs/${run}/job/${jobs[0].id}`;
+  const profileIds = new Set();
+  let linkedJob = false;
+  for (const [, href] of comment.body.matchAll(/\bhref="([^"]+)"/g)) {
+    let link;
+    try {
+      link = new URL(href.replaceAll('&amp;', '&'));
+    } catch {
+      continue;
+    }
+    if (link.origin === 'https://github.com' && link.pathname === jobPath) linkedJob = true;
+    if (link.origin !== 'https://app.garnet.ai' || link.pathname !== `/public/runs/${run}`) continue;
+    const ids = link.searchParams.getAll('profile');
+    if (ids.length !== 1 || !profileID.test(ids[0])) return null;
+    profileIds.add(ids[0]);
+  }
+  if (!linkedJob || profileIds.size !== 1) return null;
+  const profile = await profileFor(context, [...profileIds][0], call);
+  return profile ? { verdict, profile, url: comment.html_url } : null;
 }
 
 function selectors(repo, pr, head, run, attempt) {
@@ -230,9 +263,11 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
   const active = current(latest, context) && latest.base.sha === base && matchesRun(githubRun, context);
   const verdict = active ? (result?.verdict ?? 'unknown') : 'superseded';
   const args = [repo, pr, head, run.id, run.run_attempt].join(' ');
-  const conclusion = verdict === 'nothing-new' ? 'success' : verdict === 'changed' ? 'failure' : 'action_required';
+  const conclusion = ['nothing-new', 'background-only'].includes(verdict) ? 'success' :
+    verdict === 'changed' ? 'failure' : 'action_required';
   const titles = {
     'nothing-new': 'No new runtime behavior recorded',
+    'background-only': 'No new workload connections recorded',
     changed: 'Runtime behavior changed',
     'removals-only': 'Runtime destinations no longer seen'
   };
@@ -242,6 +277,7 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
       summary: [
         `[Garnet Runtime Review](${result.url}) · compared with \`${base}\` · capture is best-effort.`,
         `Head \`${head}\` · Linux run \`${run.id}\` attempt \`${run.run_attempt}\` · MCP profile \`${result.profile.id}\`.`,
+        ...(verdict === 'background-only' ? ['Garnet reported changes to connections not tied to a workflow step.'] : []),
         ...(verdict === 'changed' ? [`Garnet receipt lookup selectors: \`${args}\`.`] : []),
         ...(verdict === 'removals-only' ? ['The exhibit holds removal-only comparisons for human review.'] : [])
       ].join('\n\n')
