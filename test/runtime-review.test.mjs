@@ -5,6 +5,7 @@ import { decide, evidence, invalidateAdvancedBaseChecks, isGarnetComment, matche
 
 const head = 'a'.repeat(40);
 const base = 'b'.repeat(40);
+const prBase = { ref: 'main', sha: base };
 const id = '73562dce-ddbc-464b-aea0-beb467d8d615';
 const repo = 'garnet-labs/devin-receipt-demo';
 const url = `https://github.com/${repo}/pull/1#issuecomment-42`;
@@ -97,10 +98,12 @@ test('PR #6 publishes success only after binding its App comment and capture pro
     state: 'open', head: { sha: recordedHead, repo: { full_name: recordedRepo } },
     base: { ref: 'main', sha: recordedBase }
   };
+  const staleBase = { ...getPull.base, sha: base };
   const getComment = appEvidence(comment, recordedContext, 139590716442);
   const writes = [];
   const gh = async (path, body, method) => {
-    if (path === 'pulls/6') return getPull;
+    if (path === 'pulls/6') return { ...getPull, base: staleBase };
+    if (path === 'git/ref/heads/main') return { object: { sha: recordedBase } };
     if (path === 'actions/runs/45724477522') return run;
     if (body === undefined) return getComment(path);
     writes.push({ path, body, method });
@@ -113,18 +116,22 @@ test('PR #6 publishes success only after binding its App comment and capture pro
   ]);
   assert.equal(writes[0].body.head_sha, recordedHead);
   assert.equal(writes[1].body.conclusion, 'success');
+  assert.equal(writes[1].body.external_id, `6:main:${recordedBase}`);
+  assert.ok(writes[1].body.output.summary.includes(`compared with \`${recordedBase}\``));
   assert.equal(writes[1].body.output.title, 'No new runtime behavior recorded');
 
   assert.equal(await evidence(appEvidence({
     ...comment, body: comment.body.replace('/runs/45724477522/', '/runs/1/')
-  }, recordedContext, 139590716442), recordedContext, recordedBase, readMcp(recordedProfile)), null);
+  }, recordedContext, 139590716442), recordedContext, getPull.base, readMcp(recordedProfile)), null);
   assert.equal(await evidence(appEvidence({
     ...comment, performed_via_github_app: { id: 1 }
-  }, recordedContext, 139590716442), recordedContext, recordedBase, readMcp(recordedProfile)), null);
-  assert.equal(await evidence(getComment, recordedContext, recordedBase,
+  }, recordedContext, 139590716442), recordedContext, getPull.base, readMcp(recordedProfile)), null);
+  assert.equal(await evidence(getComment, recordedContext, getPull.base,
     readMcp({ ...recordedProfile, runAttempt: 2 })), null);
-  assert.equal(await evidence(getComment, recordedContext, recordedBase,
+  assert.equal(await evidence(getComment, recordedContext, getPull.base,
     readMcp({ ...recordedProfile, id })), null);
+  assert.equal(await evidence(async path => path === 'git/ref/heads/main' ? { object: { sha: head } } : getComment(path),
+    recordedContext, staleBase, readMcp(recordedProfile)), null);
 });
 
 test('GitHub App identity and exact run attempt cannot be substituted', () => {
@@ -276,11 +283,11 @@ test('the hosted comparison must match the linked App comment and capture run', 
       `<a href="https://app.garnet.ai/public/runs/2?profile=${id}">Full record</a>`
     ].join('\n')
   };
-  const matched = await evidence(appEvidence(comment, context, 123), context, base, read);
+  const matched = await evidence(appEvidence(comment, context, 123), context, prBase, read);
   assert.equal(matched.verdict, 'nothing-new');
   assert.equal(matched.profile.id, id);
-  assert.deepEqual(await evidence(appEvidence(comment, context, 123, {}), context, base, read), matched);
-  assert.equal(await evidence(appEvidence(comment, context, 123, { run_attempt: 2 }), context, base, read), null);
+  assert.deepEqual(await evidence(appEvidence(comment, context, 123, {}), context, prBase, read), matched);
+  assert.equal(await evidence(appEvidence(comment, context, 123, { run_attempt: 2 }), context, prBase, read), null);
   for (const body of [
     comment.body.replace('/runs/2/', '/runs/3/'),
     comment.body.replace('/job/123', '/job/124'),
@@ -289,10 +296,10 @@ test('the hosted comparison must match the linked App comment and capture run', 
     comment.body.replace(`<!-- garnet:commit ${head} -->`, `<!-- garnet:commit ${base} -->`),
     comment.body.replace(JSON.stringify(marker()), '{malformed}')
   ]) {
-    assert.equal(await evidence(appEvidence({ ...comment, body }, context, 123), context, base, read), null);
+    assert.equal(await evidence(appEvidence({ ...comment, body }, context, 123), context, prBase, read), null);
   }
   assert.equal(await evidence(appEvidence(comment, { ...context, attempt: 2 }, 124),
-    { ...context, attempt: 2 }, base, read), null);
+    { ...context, attempt: 2 }, prBase, read), null);
 });
 
 test('a finalized App change with background additions but no workload delta stays scoped', () => {
@@ -340,8 +347,8 @@ test('publishes head-bound checks; only observed changes hand work to Steward', 
     await publish(run, repo, gh, async (_gh, observed, baseline) => {
       assert.notEqual(state, 'ci-failed');
       assert.deepEqual(observed, context);
-      assert.equal(baseline, base);
-      return { verdict: state === 'superseded' ? 'nothing-new' : state, url, profile: profile() };
+      assert.deepEqual(baseline, prBase);
+      return { verdict: state === 'superseded' ? 'nothing-new' : state, url, profile: profile(), comparisonBase: base };
     });
     assert.equal(conclusion, {
       'nothing-new': 'success', 'background-only': 'success', changed: 'failure'
@@ -353,7 +360,7 @@ test('main advancing invalidates old successes but keeps comparisons for the cur
   const oldBase = 'c'.repeat(40);
   const event = { ref: 'refs/heads/main', before: oldBase, after: base };
   const pull = {
-    number: 1, state: 'open', base: { ref: 'main', sha: base },
+    number: 1, state: 'open', base: { ref: 'main', sha: oldBase },
     head: { sha: head, repo: { full_name: repo } }
   };
   const outdated = {
@@ -363,6 +370,7 @@ test('main advancing invalidates old successes but keeps comparisons for the cur
   };
   const writes = [];
   const gh = async (path, body, method) => {
+    if (path === 'git/ref/heads/main') return { object: { sha: base } };
     if (path === 'pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=1') return [
       pull, { ...pull, number: 2, head: { ...pull.head, repo: { full_name: 'other/fork' } } }
     ];
@@ -387,6 +395,35 @@ test('main advancing invalidates old successes but keeps comparisons for the cur
     async () => assert.fail('unrelated push')), undefined);
 });
 
+test('an older invalidation scan preserves a passing check for the latest main tip', async () => {
+  const previousTip = 'c'.repeat(40);
+  const latestTip = 'd'.repeat(40);
+  const event = { ref: 'refs/heads/main', before: base, after: previousTip };
+  const pull = {
+    number: 1, state: 'open', base: { ref: 'main', sha: base },
+    head: { sha: head, repo: { full_name: repo } }
+  };
+  const passingCheck = (id, comparison) => ({
+    id, name: 'garnet/runtime-diff', app: { id: 15368 }, conclusion: 'success',
+    external_id: `1:main:${comparison}`,
+    output: { summary: `[Garnet Runtime Review](${url}) · compared with \`${comparison}\`.` }
+  });
+  let tip = previousTip;
+  const writes = [];
+  const gh = async (path, body, method) => {
+    if (path === 'git/ref/heads/main') return { object: { sha: tip } };
+    if (path.startsWith('pulls?')) return [pull];
+    if (path === 'pulls/1') return pull;
+    if (path.startsWith(`commits/${head}/check-runs?`)) {
+      tip = latestTip;
+      return { check_runs: [passingCheck(11, previousTip), passingCheck(12, latestTip)] };
+    }
+    writes.push([path, body.conclusion, method]);
+  };
+  assert.equal(await invalidateAdvancedBaseChecks(event, repo, gh), 1);
+  assert.deepEqual(writes, [['check-runs/11', 'action_required', 'PATCH']]);
+});
+
 test('a publisher cannot leave a passing check if main advanced during publication', async () => {
   const run = {
     id: 2, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: head,
@@ -404,9 +441,37 @@ test('a publisher cannot leave a passing check if main advanced during publicati
     conclusions.push(body.conclusion);
   };
   assert.equal(await publish(run, repo, gh, async () => ({
-    verdict: 'nothing-new', url, profile: profile()
+    verdict: 'nothing-new', url, profile: profile(), comparisonBase: base
   })), `garnet/runtime-diff: superseded on ${head}`);
   assert.deepEqual(conclusions, ['success', 'action_required']);
+});
+
+test('a publisher revokes a pass when the live base ref moves but the PR base SHA stays fixed', async () => {
+  const comparisonBase = 'c'.repeat(40);
+  const newTip = 'd'.repeat(40);
+  const run = {
+    id: 2, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: head,
+    run_attempt: 1, head_repository: { full_name: repo }, pull_requests: [{ number: 1 }], conclusion: 'success'
+  };
+  const pull = {
+    state: 'open', base: { ref: 'main', sha: base }, head: { sha: head, repo: { full_name: repo } }
+  };
+  const writes = [];
+  const gh = async (path, body, method) => {
+    if (path === 'pulls/1') return pull;
+    if (path === 'actions/runs/2') return run;
+    if (path === 'git/ref/heads/main') return { object: { sha: writes.length ? newTip : comparisonBase } };
+    if (path === 'check-runs') return { id: 1 };
+    assert.equal(path, 'check-runs/1');
+    writes.push([body.conclusion, body.external_id, method]);
+  };
+  assert.equal(await publish(run, repo, gh, async () => ({
+    verdict: 'nothing-new', url, profile: profile(), comparisonBase
+  })), `garnet/runtime-diff: superseded on ${head}`);
+  assert.deepEqual(writes, [
+    ['success', `1:main:${comparisonBase}`, 'PATCH'],
+    ['action_required', undefined, 'PATCH']
+  ]);
 });
 
 test('MCP transport handles JSON and SSE, but never parses tool text as evidence', async () => {
