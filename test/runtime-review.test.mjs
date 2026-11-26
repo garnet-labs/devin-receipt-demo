@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import pr6 from './pr-review-pr6.json' with { type: 'json' };
-import { decide, evidence, isGarnetComment, matchesRun, mcp, profileFor, publish, workloadEgress } from '../scripts/runtime-review.mjs';
+import { decide, evidence, invalidateAdvancedBaseChecks, isGarnetComment, matchesRun, mcp, profileFor, publish, workloadEgress } from '../scripts/runtime-review.mjs';
 
 const head = 'a'.repeat(40);
 const base = 'b'.repeat(40);
@@ -276,6 +276,7 @@ test('publishes head-bound checks; only observed changes hand work to Steward', 
         assert.equal(payload.name, 'garnet/runtime-diff');
         assert.equal(payload.head_sha, head);
         assert.equal(payload.status, 'in_progress');
+        assert.equal(payload.external_id, `1:main:${base}`);
         return { id: 57 };
       }
       if (path === 'actions/runs/2') return run;
@@ -294,6 +295,66 @@ test('publishes head-bound checks; only observed changes hand work to Steward', 
     });
     assert.equal(conclusion, { 'nothing-new': 'success', changed: 'failure' }[state] ?? 'action_required');
   }
+});
+
+test('main advancing invalidates old successes but keeps comparisons for the current base', async () => {
+  const oldBase = 'c'.repeat(40);
+  const event = { ref: 'refs/heads/main', before: oldBase, after: base };
+  const pull = {
+    number: 1, state: 'open', base: { ref: 'main', sha: base },
+    head: { sha: head, repo: { full_name: repo } }
+  };
+  const outdated = {
+    id: 11, name: 'garnet/runtime-diff', app: { id: 15368 }, conclusion: 'success',
+    external_id: `1:main:${oldBase}`,
+    output: { summary: `[Garnet Runtime Review](${url}) · compared with \`${oldBase}\`.` }
+  };
+  const writes = [];
+  const gh = async (path, body, method) => {
+    if (path === 'pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=1') return [
+      pull, { ...pull, number: 2, head: { ...pull.head, repo: { full_name: 'other/fork' } } }
+    ];
+    if (path === 'pulls/1') return pull;
+    if (path === `commits/${head}/check-runs?check_name=garnet%2Fruntime-diff&filter=all&per_page=100&page=1`) return {
+      check_runs: [
+        outdated, { ...outdated, id: 12, external_id: `1:main:${base}` },
+        { ...outdated, id: 13, external_id: '' },
+        { ...outdated, id: 14, app: { id: 99 } },
+        { ...outdated, id: 15, output: { summary: outdated.output.summary.replace('/pull/1', '/pull/2') } },
+        { ...outdated, id: 16, conclusion: 'failure' }
+      ]
+    };
+    writes.push([path, body.status, body.conclusion, method]);
+  };
+  assert.equal(await invalidateAdvancedBaseChecks(event, repo, gh), 2);
+  assert.deepEqual(writes, [
+    ['check-runs/11', 'completed', 'action_required', 'PATCH'],
+    ['check-runs/13', 'completed', 'action_required', 'PATCH']
+  ]);
+  assert.equal(await invalidateAdvancedBaseChecks({ ...event, ref: 'refs/heads/feature' }, repo,
+    async () => assert.fail('unrelated push')), undefined);
+});
+
+test('a publisher cannot leave a passing check if main advanced during publication', async () => {
+  const run = {
+    id: 2, path: '.github/workflows/ci.yml', event: 'pull_request', head_sha: head,
+    run_attempt: 1, head_repository: { full_name: repo }, pull_requests: [{ number: 1 }], conclusion: 'success'
+  };
+  const conclusions = [];
+  const gh = async (path, body) => {
+    if (path === 'pulls/1') return {
+      state: 'open', base: { ref: 'main', sha: conclusions.length ? 'c'.repeat(40) : base },
+      head: { sha: head, repo: { full_name: repo } }
+    };
+    if (path === 'actions/runs/2') return run;
+    if (path === 'check-runs') return { id: 1 };
+    assert.equal(path, 'check-runs/1');
+    conclusions.push(body.conclusion);
+  };
+  assert.equal(await publish(run, repo, gh, async () => ({
+    verdict: 'nothing-new', url, profile: profile()
+  })), `garnet/runtime-diff: superseded on ${head}`);
+  assert.deepEqual(conclusions, ['success', 'action_required']);
 });
 
 test('MCP transport handles JSON and SSE, but never parses tool text as evidence', async () => {

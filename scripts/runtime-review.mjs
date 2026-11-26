@@ -10,6 +10,7 @@ const profileID = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const captureWorkflow = '.github/workflows/ci.yml';
 const captureJob = 'runtime-build';
 const checkName = 'garnet/runtime-diff';
+const actionsAppId = 15368;
 const endpoint = 'https://api.garnet.ai/api/v2/mcp';
 const exec = promisify(execFile);
 
@@ -147,9 +148,53 @@ function selectors(repo, pr, head, run, attempt) {
 }
 
 function current(pull, context) {
-  return pull.state === 'open' && pull.head?.sha === context.head &&
+  return pull?.state === 'open' && pull.head?.sha === context.head &&
     pull.head.repo?.full_name === context.repo && pull.base?.ref === 'main' &&
     sha.test(pull.base.sha);
+}
+
+function checkBase(pr, base) {
+  return `${pr}:${base.ref}:${base.sha}`;
+}
+
+function invalidateCheck(gh, id) {
+  return gh(`check-runs/${id}`, {
+    status: 'completed',
+    conclusion: 'action_required',
+    output: {
+      title: 'No usable runtime comparison',
+      summary: 'The PR base advanced. A fresh capture and comparison are required.'
+    }
+  }, 'PATCH');
+}
+
+export async function invalidateAdvancedBaseChecks(event, repo, gh) {
+  if (event?.ref !== 'refs/heads/main' || event.deleted || !sha.test(event.after) || event.before === event.after) return;
+  let invalidated = 0;
+  for (let page = 1; ; page++) {
+    const pulls = await gh(`pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=${page}`);
+    if (!Array.isArray(pulls)) throw new Error('GitHub did not return pull requests');
+    for (const pull of pulls) {
+      const pr = pull?.number;
+      const head = pull?.head?.sha;
+      if (!Number.isSafeInteger(pr) || pr <= 0 || !sha.test(head) || !current(pull, { repo, head })) continue;
+      const commentPrefix = `[Garnet Runtime Review](https://github.com/${repo}/pull/${pr}#issuecomment-`;
+      for (let index = 1; ; index++) {
+        const result = await gh(`commits/${head}/check-runs?check_name=${encodeURIComponent(checkName)}&filter=all&per_page=100&page=${index}`);
+        if (!Array.isArray(result?.check_runs)) throw new Error('GitHub did not return check runs');
+        for (const check of result.check_runs) {
+          if (check.name !== checkName || check.app?.id !== actionsAppId || check.conclusion !== 'success' ||
+              !check.output?.summary?.startsWith(commentPrefix) || !Number.isSafeInteger(check.id) || check.id <= 0) continue;
+          const latest = await gh(`pulls/${pr}`);
+          if (!current(latest, { repo, head }) || check.external_id === checkBase(pr, latest.base)) continue;
+          await invalidateCheck(gh, check.id);
+          invalidated++;
+        }
+        if (result.check_runs.length < 100) break;
+      }
+    }
+    if (pulls.length < 100) return invalidated;
+  }
 }
 
 export async function publish(run, repo, gh, readEvidence = evidence) {
@@ -162,7 +207,7 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
   if (!current(initial, context)) return;
   const base = initial.base.sha;
   const check = await gh('check-runs', {
-    name: checkName, head_sha: head, status: 'in_progress',
+    name: checkName, head_sha: head, status: 'in_progress', external_id: checkBase(pr, initial.base),
     details_url: `https://github.com/${repo}/actions/runs/${run.id}`,
     output: { title: 'Waiting for Garnet evidence', summary: 'Only the current PR head is evaluated.' }
   });
@@ -171,7 +216,8 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
     const deadline = Date.now() + 480_000;
     for (let tries = 0; tries < 24 && !result && Date.now() < deadline; tries++) {
       if (tries > 0) await wait(15_000);
-      if (!current(await getPR(), context)) break;
+      const pull = await getPR();
+      if (!current(pull, context) || pull.base.sha !== base) break;
       try {
         result = await readEvidence(gh, context, base);
       } catch {
@@ -202,6 +248,13 @@ export async function publish(run, repo, gh, readEvidence = evidence) {
     }
     : { title: 'No usable runtime comparison', summary: 'No passing gate was issued. Do not attempt a code fix from this check.' };
   await gh(`check-runs/${check.id}`, { status: 'completed', conclusion, output }, 'PATCH');
+  if (conclusion === 'success') {
+    const published = await getPR();
+    if (!current(published, context) || published.base.sha !== base) {
+      await invalidateCheck(gh, check.id);
+      return `${checkName}: superseded on ${head}`;
+    }
+  }
   return `${checkName}: ${verdict} on ${head}`;
 }
 
@@ -266,14 +319,20 @@ async function receipt(args) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    if (process.argv[2] === 'publish' && process.argv.length === 3) {
+    if (['publish', 'invalidate-base'].includes(process.argv[2]) && process.argv.length === 3) {
       const { GITHUB_REPOSITORY: repo, GITHUB_TOKEN: token, GITHUB_EVENT_PATH: event } = process.env;
       if (!token || !event) throw new Error('Missing trusted workflow context');
-      const { workflow_run: run } = JSON.parse(await readFile(event, 'utf8'));
-      const status = await publish(run, repo, github(repo, token));
-      if (status) console.log(status);
+      const payload = JSON.parse(await readFile(event, 'utf8'));
+      const gh = github(repo, token);
+      if (process.argv[2] === 'publish') {
+        const status = await publish(payload.workflow_run, repo, gh);
+        if (status) console.log(status);
+      } else {
+        const count = await invalidateAdvancedBaseChecks(payload, repo, gh);
+        if (count !== undefined) console.log(`Invalidated ${count} passing comparison(s) for superseded base commits.`);
+      }
     } else if (process.argv[2] === 'receipt' && process.argv.length === 8) await receipt(process.argv.slice(3));
-    else throw new Error('Use publish or receipt <owner/repo> <pr> <head> <run> <attempt>');
+    else throw new Error('Use publish, invalidate-base, or receipt <owner/repo> <pr> <head> <run> <attempt>');
   } catch {
     console.error('Runtime Review stopped: selectors, evidence, or required GitHub access were not available.');
     process.exitCode = 1;
